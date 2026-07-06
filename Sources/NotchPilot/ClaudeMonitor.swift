@@ -79,6 +79,21 @@ final class ClaudeMonitor: ObservableObject {
     /// Used to assign a specific PID to each session for tmux navigation.
     private var lastLiveClaudePIDs: [String: [Int32]] = [:]
 
+    /// Session IDs whose SessionEnd hook fired, with the time it fired.
+    /// A cancelled session's jsonl keeps a fresh mtime for a while after
+    /// exit — without this it would occupy a capacity slot and push a
+    /// live session out of the list. Entries expire after 24h (session
+    /// IDs are never reused, this is just to keep the map bounded).
+    private var endedSessions: [String: Date] = [:]
+
+    func markSessionEnded(_ id: String) {
+        endedSessions[id] = Date()
+        endedSessions = endedSessions.filter {
+            Date().timeIntervalSince($0.value) < 24 * 60 * 60
+        }
+        refresh()
+    }
+
     func start() {
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
@@ -214,6 +229,10 @@ final class ClaudeMonitor: ObservableObject {
                     return lastActivity
                 }()
                 let sessionID = jsonlURL.deletingPathExtension().lastPathComponent
+
+                // Sessions that told us they exited (SessionEnd hook) are
+                // gone no matter how fresh their jsonl looks.
+                if endedSessions[sessionID] != nil { continue }
 
                 // Fold subagent transcript activity into the session's
                 // liveness. Agents write to <session-id>/subagents/…
