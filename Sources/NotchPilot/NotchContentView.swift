@@ -2227,9 +2227,6 @@ struct NotchContentView: View {
 
             statBadge
             customizeButton
-            if updateChecker.updateAvailable {
-                updateButton
-            }
             quitButton
         }
     }
@@ -2988,6 +2985,14 @@ struct NotchContentView: View {
                 title: "Hide in fullscreen",
                 subtitle: "Hide the notch when any app is in fullscreen mode",
                 isOn: $prefs.hideInFullscreen
+            )
+
+            behaviorRow(
+                iconOn: "checkmark.shield.fill",
+                iconOff: "shield.slash",
+                title: "Auto-allow tools in settings.json",
+                subtitle: "Skip the prompt for tools listed in permissions.allow",
+                isOn: $prefs.autoAllowListedTools
             )
 
             positionRow

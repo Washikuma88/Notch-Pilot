@@ -204,6 +204,17 @@ final class BuddyPreferences: ObservableObject {
         }
     }
 
+    /// When true, tool-permission requests whose tool name is in
+    /// settings.json's `permissions.allow` are auto-approved by the notch
+    /// without showing a prompt. Off by default: Claude Code only sends a
+    /// PermissionRequest when it wants the user to decide, so mirroring the
+    /// allow-list here would silently override that intent.
+    @Published var autoAllowListedTools: Bool {
+        didSet {
+            UserDefaults.standard.set(autoAllowListedTools, forKey: Self.autoAllowListedToolsKey)
+        }
+    }
+
     /// Master toggle for speech — when off, no event can trigger a
     /// buddy pop-out regardless of per-event flags. Defaults on.
     @Published var speechEnabled: Bool {
@@ -377,6 +388,7 @@ final class BuddyPreferences: ObservableObject {
     private static let speechKey = "notchpilot.speech"
     private static let speechEventsKey = "notchpilot.speech.events"
     private static let suppressPermKey = "notchpilot.suppressPermissionWhenFocused"
+    private static let autoAllowListedToolsKey = "notchpilot.autoAllowListedTools"
     private static let hideFullscreenKey = "notchpilot.hideInFullscreen"
     private static let notchPositionKey = "notchpilot.notchPosition"  // legacy
     private static let notchAnchorFractionKey = "notchpilot.notchAnchorFraction"
@@ -401,7 +413,8 @@ final class BuddyPreferences: ObservableObject {
         hapticsEnabled = defaults.object(forKey: Self.hapticsKey) as? Bool ?? true
         speechEnabled = defaults.object(forKey: Self.speechKey) as? Bool ?? true
         suppressPermissionWhenFocused = defaults.object(forKey: Self.suppressPermKey) as? Bool ?? false
-        hideInFullscreen = defaults.object(forKey: Self.hideFullscreenKey) as? Bool ?? true
+        autoAllowListedTools = defaults.object(forKey: Self.autoAllowListedToolsKey) as? Bool ?? false
+        hideInFullscreen = defaults.object(forKey: Self.hideFullscreenKey) as? Bool ?? false
 
         if let storedFraction = defaults.object(forKey: Self.notchAnchorFractionKey) as? Double {
             notchAnchorFraction = CGFloat(storedFraction)
