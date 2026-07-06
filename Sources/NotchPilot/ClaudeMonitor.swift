@@ -38,6 +38,10 @@ struct ClaudeSession: Identifiable, Equatable {
     /// PID of the matched claude process — used by TerminalJumper to
     /// jump to the exact tmux pane when multiple sessions share a cwd.
     let claudePID: Int32?
+    /// Subagent transcripts under <session-id>/subagents/ written to in
+    /// the last 60s. The parent jsonl goes quiet while agents run, so
+    /// this is what keeps a delegating session visibly alive.
+    let activeAgentCount: Int
 }
 
 @MainActor
@@ -148,7 +152,8 @@ final class ClaudeMonitor: ObservableObject {
             let jsonlPath: String    // used to look up sticky caches
             let cwd: String          // normalized jsonl cwd (drifts with cd)
             let startTime: Date
-            let lastActivity: Date
+            let lastActivity: Date   // max(parent jsonl, newest subagent jsonl)
+            let activeAgents: Int    // subagent jsonls written to in last 60s
             let parsed: (message: String, status: String, cwd: String, model: String, nativeMode: String, toolAction: ToolAction, contextTokens: Int)
         }
         var candidates: [Candidate] = []
@@ -210,6 +215,29 @@ final class ClaudeMonitor: ObservableObject {
                 }()
                 let sessionID = jsonlURL.deletingPathExtension().lastPathComponent
 
+                // Fold subagent transcript activity into the session's
+                // liveness. Agents write to <session-id>/subagents/…
+                // (workflow agents one directory deeper) while the parent
+                // jsonl sits untouched, so a delegating session looks dead
+                // if we only watch the parent file. stat-only, no parsing.
+                var agentLast = Date.distantPast
+                var activeAgents = 0
+                let subagentsDir = jsonlURL.deletingPathExtension()
+                    .appendingPathComponent("subagents")
+                if let en = fm.enumerator(
+                    at: subagentsDir,
+                    includingPropertiesForKeys: [.contentModificationDateKey],
+                    options: [.skipsHiddenFiles]
+                ) {
+                    for case let f as URL in en where f.pathExtension == "jsonl" {
+                        guard let m = (try? f.resourceValues(
+                            forKeys: [.contentModificationDateKey]
+                        ))?.contentModificationDate else { continue }
+                        if m > agentLast { agentLast = m }
+                        if now.timeIntervalSince(m) < 60 { activeAgents += 1 }
+                    }
+                }
+
                 candidates.append(Candidate(
                     sessionID: sessionID,
                     projectName: projectName,
@@ -218,7 +246,8 @@ final class ClaudeMonitor: ObservableObject {
                     jsonlPath: jsonlURL.path,
                     cwd: ProcessLookup.normalize(parsed.cwd),
                     startTime: startTime,
-                    lastActivity: lastActivity,
+                    lastActivity: max(lastActivity, agentLast),
+                    activeAgents: activeAgents,
                     parsed: parsed
                 ))
             }
@@ -269,6 +298,17 @@ final class ClaudeMonitor: ObservableObject {
                     ?? (c.parsed.contextTokens > 0 ? c.parsed.contextTokens : 0)
                 let stickyWindow = stickyContextWindow[c.jsonlPath] ?? 200_000
 
+                // A delegating session's own tail often has no tool_use in
+                // the parse window (agent chatter pushes it out), leaving
+                // shortStatus empty — which the UI reads as "idle". When
+                // agents are actively writing, surface them as the status.
+                let status = (c.parsed.status.isEmpty && c.activeAgents > 0)
+                    ? "\(c.activeAgents) agent\(c.activeAgents == 1 ? "" : "s")"
+                    : c.parsed.status
+                let message = (c.parsed.message.isEmpty && c.activeAgents > 0)
+                    ? "\(c.activeAgents) agent\(c.activeAgents == 1 ? "" : "s") running"
+                    : c.parsed.message
+
                 result.append(ClaudeSession(
                     id: c.sessionID,
                     projectName: c.projectName,
@@ -276,15 +316,16 @@ final class ClaudeMonitor: ObservableObject {
                     cwd: c.parsed.cwd,
                     startTime: c.startTime,
                     lastActivity: c.lastActivity,
-                    lastMessage: c.parsed.message,
-                    shortStatus: c.parsed.status,
+                    lastMessage: message,
+                    shortStatus: status,
                     model: c.parsed.model,
                     nativeMode: c.parsed.nativeMode,
                     toolAction: c.parsed.toolAction,
                     isActive: isActive,
                     contextTokens: stickyTokens,
                     contextWindow: stickyWindow,
-                    claudePID: idx < pids.count ? pids[idx] : nil
+                    claudePID: idx < pids.count ? pids[idx] : nil,
+                    activeAgentCount: c.activeAgents
                 ))
             }
         }
