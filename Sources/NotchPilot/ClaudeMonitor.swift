@@ -105,6 +105,16 @@ final class ClaudeMonitor: ObservableObject {
         }
     }
 
+    /// Claude Code names each project directory by replacing every
+    /// character outside [A-Za-z0-9-] in the session's *launch* cwd with
+    /// "-" ("/Users/x/.local/share" → "-Users-x--local-share"). The
+    /// process cwd never changes after launch, so munging it reproduces
+    /// the directory name exactly — a stable join key between live
+    /// processes and their transcript directories.
+    private static func mungeCwd(_ cwd: String) -> String {
+        String(cwd.map { c in (c.isLetter || c.isNumber || c == "-") ? c : "-" })
+    }
+
     private func loadSessions() -> [ClaudeSession] {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let projectsDir = home.appendingPathComponent(".claude/projects")
@@ -134,8 +144,9 @@ final class ClaudeMonitor: ObservableObject {
             let sessionID: String
             let projectName: String
             let projectPath: String
+            let projectDirName: String  // stable group key (munged launch cwd)
             let jsonlPath: String    // used to look up sticky caches
-            let cwd: String          // normalized, used as the group key
+            let cwd: String          // normalized jsonl cwd (drifts with cd)
             let startTime: Date
             let lastActivity: Date
             let parsed: (message: String, status: String, cwd: String, model: String, nativeMode: String, toolAction: ToolAction, contextTokens: Int)
@@ -203,6 +214,7 @@ final class ClaudeMonitor: ObservableObject {
                     sessionID: sessionID,
                     projectName: projectName,
                     projectPath: projectURL.path,
+                    projectDirName: projectURL.lastPathComponent,
                     jsonlPath: jsonlURL.path,
                     cwd: ProcessLookup.normalize(parsed.cwd),
                     startTime: startTime,
@@ -212,24 +224,42 @@ final class ClaudeMonitor: ObservableObject {
             }
         }
 
-        // Apply the per-cwd capacity filter: keep at most N candidates per
-        // cwd, where N is the live claude-process count in that cwd. Most
-        // recently active wins within a group.
+        // Apply the per-launch-cwd capacity filter: keep at most N candidates
+        // per project directory, where N is the live claude-process count
+        // whose cwd munges to that directory name. Most recently active wins.
+        //
+        // Anchor on the project DIRECTORY NAME, not the jsonl's cwd field:
+        // the jsonl cwd tracks wherever the agent last cd'd mid-task and
+        // drifts away from the process cwd (which stays at the launch dir
+        // forever). Matching drifting-cwd against process-cwd silently
+        // filtered out every session whose agent was working inside a
+        // project subdirectory.
         var grouped: [String: [Candidate]] = [:]
         for c in candidates {
-            grouped[c.cwd, default: []].append(c)
+            grouped[c.projectDirName, default: []].append(c)
+        }
+
+        // Munge live process cwds the same way Claude Code names project
+        // directories, so both sides of the lookup share a stable key.
+        var countsByDir: [String: Int] = [:]
+        var pidsByDir: [String: [Int32]] = [:]
+        for (cwd, n) in liveCwdCounts {
+            countsByDir[Self.mungeCwd(cwd), default: 0] += n
+        }
+        for (cwd, pids) in lastLiveClaudePIDs {
+            pidsByDir[Self.mungeCwd(cwd), default: []].append(contentsOf: pids)
         }
 
         var result: [ClaudeSession] = []
-        for (cwd, group) in grouped {
-            let capacity = liveCwdCounts[cwd] ?? 0
+        for (dirName, group) in grouped {
+            let capacity = countsByDir[dirName] ?? 0
             guard capacity > 0 else { continue }
             let sorted = group.sorted { $0.lastActivity > $1.lastActivity }
             // Sort the PID list so session→PID assignment is deterministic:
             // liveClaudeCwdCounts() appends PIDs in kernel enumeration order,
             // which can shuffle between scans and mismatch the sorted-by-
             // activity candidates. Sorting at least makes the pairing stable.
-            let pids = (lastLiveClaudePIDs[cwd] ?? []).sorted()
+            let pids = (pidsByDir[dirName] ?? []).sorted()
             for (idx, c) in sorted.prefix(capacity).enumerated() {
                 let isActive = now.timeIntervalSince(c.lastActivity) < activeThreshold
                 // Use sticky cached values so the UI's context ring

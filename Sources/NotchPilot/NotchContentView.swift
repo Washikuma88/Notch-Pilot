@@ -2227,9 +2227,6 @@ struct NotchContentView: View {
 
             statBadge
             customizeButton
-            if updateChecker.updateAvailable {
-                updateButton
-            }
             quitButton
         }
     }

@@ -38,7 +38,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // reveal the notch in its final position, which means the notch
         // needs to already be there.
         startNotchWindow()
-        updateChecker.startPeriodicChecks()
+        // Update checks disabled in the renzhe edition: this fork is built
+        // and installed locally, so upstream release prompts would only
+        // offer to overwrite our own fixes.
         usage.startPeriodicRefresh()
         setupHotkeys()
 
