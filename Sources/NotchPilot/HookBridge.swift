@@ -109,10 +109,20 @@ final class HookBridge: ObservableObject {
             learnSessionPID(payload: request.payload, peerPID: request.peerPID)
             handleModeUpdate(payload: request.payload)
             respond(nil)
+        case "SessionEnd":
+            if let sid = request.payload["session_id"] as? String, !sid.isEmpty {
+                onSessionEnd?(sid)
+            }
+            respond(nil)
         default:
             respond(nil)
         }
     }
+
+    /// Fired (on the main actor) when a SessionEnd hook arrives — the
+    /// authoritative signal that a session exited. Wired by AppDelegate
+    /// to ClaudeMonitor so the row disappears immediately.
+    var onSessionEnd: ((String) -> Void)?
 
     /// Walk the hook process's parent chain to find the claude PID.
     /// Hook → shell → claude (the hook is this app's binary, spawned

@@ -11,7 +11,10 @@ import Foundation
 enum HookInstaller {
 
     /// Hook events we register for. Matcher is `"*"` for all.
-    private static let events = ["PermissionRequest", "PreToolUse", "UserPromptSubmit"]
+    /// SessionEnd gives us an authoritative "this session exited" signal —
+    /// without it, a cancelled session's fresh jsonl mtime keeps it
+    /// occupying a capacity slot and pushes a live session out of the list.
+    private static let events = ["PermissionRequest", "PreToolUse", "UserPromptSubmit", "SessionEnd"]
 
     /// Path to this running binary. Used as the hook command so Claude
     /// Code launches us with `--hook`. Falls back to argv[0] for SwiftPM

@@ -36,7 +36,11 @@ enum HookClient {
         case "PreToolUse", "UserPromptSubmit":
             // Fire-and-forget: let the app learn the current permission_mode
             // (which is in hook inputs but not in the jsonl between prompts).
-            sendFireAndForget(hookInput)
+            sendFireAndForget(hookInput, as: "ModeUpdate")
+        case "SessionEnd":
+            // Fire-and-forget: tell the app this session exited so it can
+            // drop the row immediately instead of trusting jsonl mtime.
+            sendFireAndForget(hookInput, as: "SessionEnd")
         default:
             exit(0)
         }
@@ -90,13 +94,13 @@ enum HookClient {
 
     // MARK: - Event handlers
 
-    private static func sendFireAndForget(_ hookInput: [String: Any]) -> Never {
+    private static func sendFireAndForget(_ hookInput: [String: Any], as event: String) -> Never {
         let fd = connectSocket()
         if fd < 0 { exit(0) }
         defer { close(fd) }
 
         let msg: [String: Any] = [
-            "event": "ModeUpdate",
+            "event": event,
             "cwd": hookInput["cwd"] ?? "",
             "permission_mode":
                 hookInput["permission_mode"]
