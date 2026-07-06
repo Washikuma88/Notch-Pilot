@@ -2990,6 +2990,14 @@ struct NotchContentView: View {
                 isOn: $prefs.hideInFullscreen
             )
 
+            behaviorRow(
+                iconOn: "checkmark.shield.fill",
+                iconOff: "shield.slash",
+                title: "Auto-allow tools in settings.json",
+                subtitle: "Skip the prompt for tools listed in permissions.allow",
+                isOn: $prefs.autoAllowListedTools
+            )
+
             positionRow
             slotsSection
         }

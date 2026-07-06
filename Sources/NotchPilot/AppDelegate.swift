@@ -19,6 +19,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let onboardingCompletedKey = "onboardingCompleted"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // One-time migration (renzhe edition): the old build defaulted
+        // "hide in fullscreen" to true, which fought iTerm2's native
+        // fullscreen and made the notch flicker every second. Clear any
+        // stored value once so the new false default takes effect; the
+        // user can still re-enable it from settings.
+        let migrationDefaults = UserDefaults.standard
+        if !migrationDefaults.bool(forKey: "renzheMigration1") {
+            migrationDefaults.removeObject(forKey: "notchpilot.hideInFullscreen")
+            migrationDefaults.set(true, forKey: "renzheMigration1")
+        }
+
         HookInstaller.installIfNeeded()
         hookBridge.start()
 

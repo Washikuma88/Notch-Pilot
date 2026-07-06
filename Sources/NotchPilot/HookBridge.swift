@@ -164,8 +164,13 @@ final class HookBridge: ObservableObject {
             ? "unknown"
             : (cwd as NSString).lastPathComponent
 
-        // Global always-allow list.
-        if alwaysAllowedTools.contains(toolName) {
+        // Global always-allow list — gated behind an opt-in toggle (off by
+        // default). Claude Code sends a PermissionRequest precisely when it
+        // wants the user to decide, so auto-approving from settings.json's
+        // allow-list without explicit consent would be overreach. When the
+        // toggle is off we fall through and queue the request for the UI.
+        if alwaysAllowedTools.contains(toolName),
+           UserDefaults.standard.bool(forKey: "notchpilot.autoAllowListedTools") {
             respond(SocketServer.Response(payload: ["behavior": "allow"]))
             return
         }

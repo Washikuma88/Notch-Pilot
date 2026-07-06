@@ -62,53 +62,61 @@ enum TerminalJumper {
     /// 3. Fall back to activating any running terminal app by bundle
     ///    ID (covers tmux/screen + unusual launch chains).
     static func jump(toCwd cwd: String, claudePID knownPID: Int32? = nil, sessionID: String? = nil) {
-        // Best: find the exact PID by checking which claude process has
-        // the session's jsonl file open.
-        var resolvedPID: Int32? = knownPID
-        if resolvedPID == nil, let sid = sessionID, !sid.isEmpty {
-            resolvedPID = findPIDBySessionID(sid, cwd: cwd)
-        }
-
-        let pidsToTry: [Int32]
-        if let pid = resolvedPID {
-            // Put the resolved PID first, then all others as fallback
-            let all = findAllClaudePIDs(cwd: cwd)
-            pidsToTry = [pid] + all.filter { $0 != pid }
-        } else {
-            pidsToTry = findAllClaudePIDs(cwd: cwd)
-        }
-
-        guard !pidsToTry.isEmpty else {
-            print("[NotchPilot] No claude process with cwd \(cwd)")
-            return
-        }
-
-        // Step 1: tmux pane navigation
-        for pid in pidsToTry {
-            if selectTmuxPane(forClaudePID: pid) {
-                print("[NotchPilot] Switched tmux to pane for pid \(pid)")
-                break
+        // All the heavy lifting — process enumeration, lsof, and tmux
+        // subprocess calls — runs off the main thread so a click never
+        // freezes the UI. Only the final AppKit activation hops to main.
+        DispatchQueue.global(qos: .userInitiated).async {
+            // Best: find the exact PID by checking which claude process has
+            // the session's jsonl file open.
+            var resolvedPID: Int32? = knownPID
+            if resolvedPID == nil, let sid = sessionID, !sid.isEmpty {
+                resolvedPID = findPIDBySessionID(sid, cwd: cwd)
             }
-        }
 
-        // Step 2: parent-chain terminal activation.
-        for pid in pidsToTry {
-            if let terminalPID = findTerminalAncestor(startingAt: pid),
-               let app = NSRunningApplication(processIdentifier: terminalPID) {
-                app.activate()
-                print("[NotchPilot] Activated \(app.localizedName ?? "terminal") (parent chain)")
+            let pidsToTry: [Int32]
+            if let pid = resolvedPID {
+                // Put the resolved PID first, then all others as fallback
+                let all = findAllClaudePIDs(cwd: cwd)
+                pidsToTry = [pid] + all.filter { $0 != pid }
+            } else {
+                pidsToTry = findAllClaudePIDs(cwd: cwd)
+            }
+
+            guard !pidsToTry.isEmpty else {
+                print("[NotchPilot] No claude process with cwd \(cwd)")
                 return
             }
-        }
 
-        // Step 3: fallback — any running terminal app.
-        if let app = fallbackTerminalApp() {
-            app.activate()
-            print("[NotchPilot] Activated \(app.localizedName ?? "terminal") (bundle-ID fallback)")
-            return
-        }
+            // Step 1: tmux pane navigation
+            for pid in pidsToTry {
+                if selectTmuxPane(forClaudePID: pid) {
+                    print("[NotchPilot] Switched tmux to pane for pid \(pid)")
+                    break
+                }
+            }
 
-        print("[NotchPilot] No terminal found for cwd \(cwd)")
+            // Step 2: parent-chain terminal activation.
+            for pid in pidsToTry {
+                if let terminalPID = findTerminalAncestor(startingAt: pid),
+                   let app = NSRunningApplication(processIdentifier: terminalPID) {
+                    DispatchQueue.main.async {
+                        app.activate()
+                        print("[NotchPilot] Activated \(app.localizedName ?? "terminal") (parent chain)")
+                    }
+                    return
+                }
+            }
+
+            // Step 3: fallback — any running terminal app.
+            DispatchQueue.main.async {
+                if let app = fallbackTerminalApp() {
+                    app.activate()
+                    print("[NotchPilot] Activated \(app.localizedName ?? "terminal") (bundle-ID fallback)")
+                } else {
+                    print("[NotchPilot] No terminal found for cwd \(cwd)")
+                }
+            }
+        }
     }
 
     /// Find the claude PID that has the session's jsonl file open.
@@ -272,7 +280,22 @@ enum TerminalJumper {
         return true
     }
 
+    /// Resolved path to `tmux`, cached after the first lookup. The shell
+    /// fallback (`/bin/sh -l -c "which tmux"`) spawns a login shell, which is
+    /// far too expensive to run on every jump — and isTerminalFocused calls
+    /// this on the main thread during view rendering. Resolve it once.
+    private static var tmuxLookupDone = false
+    private static var cachedTmuxPath: String?
+
     private static func findTmux() -> String? {
+        if tmuxLookupDone { return cachedTmuxPath }
+        let resolved = resolveTmuxPath()
+        cachedTmuxPath = resolved
+        tmuxLookupDone = true
+        return resolved
+    }
+
+    private static func resolveTmuxPath() -> String? {
         let candidates = [
             "/opt/homebrew/bin/tmux",   // Apple Silicon Homebrew
             "/usr/local/bin/tmux",      // Intel Homebrew

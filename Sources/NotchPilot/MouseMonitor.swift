@@ -30,6 +30,14 @@ final class MouseMonitor: ObservableObject {
     private var timer: Timer?
     private var fullscreenTickCounter = 0
 
+    // Debounce fullscreen transitions: the AXFullScreen read is flaky and
+    // intermittently misfires, so a single bad read must not flip the notch
+    // on/off. A reading that differs from the committed state has to repeat
+    // for 3 consecutive polls before we commit it.
+    private var pendingFSID: CGDirectDisplayID?
+    private var pendingFSValid = false
+    private var pendingFSCount = 0
+
     init(notchWidth: CGFloat, notchHeight: CGFloat) {
         self.notchWidth = notchWidth
         self.notchHeight = notchHeight
@@ -66,8 +74,23 @@ final class MouseMonitor: ObservableObject {
         if fullscreenTickCounter >= 10 {
             fullscreenTickCounter = 0
             let fs = Self.checkFullscreenScreen()
-            if fs != fullscreenScreenID {
-                fullscreenScreenID = fs
+            if fs == fullscreenScreenID {
+                // Reading matches committed state — drop any pending flip.
+                pendingFSValid = false
+                pendingFSCount = 0
+            } else if pendingFSValid && pendingFSID == fs {
+                // Same differing candidate as last poll — extend the streak.
+                pendingFSCount += 1
+                if pendingFSCount >= 3 {
+                    fullscreenScreenID = fs
+                    pendingFSValid = false
+                    pendingFSCount = 0
+                }
+            } else {
+                // New differing candidate — start a fresh 3-poll streak.
+                pendingFSValid = true
+                pendingFSID = fs
+                pendingFSCount = 1
             }
         }
     }
@@ -85,7 +108,9 @@ final class MouseMonitor: ObservableObject {
         var focusedValue: AnyObject?
         guard AXUIElementCopyAttributeValue(
             appRef, kAXFocusedWindowAttribute as CFString, &focusedValue
-        ) == .success, let window = focusedValue else { return nil }
+        ) == .success, let window = focusedValue,
+              CFGetTypeID(window) == AXUIElementGetTypeID()
+        else { return nil }
         let windowRef = window as! AXUIElement
 
         var fsValue: AnyObject?
@@ -100,9 +125,11 @@ final class MouseMonitor: ObservableObject {
         var posValue: AnyObject?
         guard AXUIElementCopyAttributeValue(
             windowRef, kAXPositionAttribute as CFString, &posValue
-        ) == .success else { return nil }
+        ) == .success, let posRef = posValue,
+              CFGetTypeID(posRef) == AXValueGetTypeID()
+        else { return nil }
         var pos = CGPoint.zero
-        AXValueGetValue(posValue as! AXValue, .cgPoint, &pos)
+        AXValueGetValue(posRef as! AXValue, .cgPoint, &pos)
 
         guard let primary = NSScreen.screens.first else { return nil }
         let appKit = CGPoint(x: pos.x, y: primary.frame.maxY - pos.y)

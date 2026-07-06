@@ -50,7 +50,9 @@ final class ClaudeMonitor: ObservableObject {
     // Sessions whose jsonl hasn't been touched in this long are hidden from
     // the list entirely — Claude Code never deletes its session files, so
     // without this filter we'd show months of historical projects.
-    private let shownThreshold: TimeInterval = 15 * 60
+    // Widened from 15 min to 6 h: real sessions often idle for hours between
+    // prompts, and the tighter cutoff was filtering out still-alive sessions.
+    private let shownThreshold: TimeInterval = 6 * 60 * 60
 
     // mtime-keyed parse cache. When a jsonl's mtime hasn't changed since
     // the last poll we reuse the cached parse instead of re-reading.
@@ -75,7 +77,7 @@ final class ClaudeMonitor: ObservableObject {
 
     func start() {
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             // Rebind weak self to a local let before the Task so the
             // inner concurrent closure isn't capturing a `var`. Swift 6's
             // strict concurrency rejects the var capture across actors.
@@ -94,7 +96,10 @@ final class ClaudeMonitor: ObservableObject {
         if newSessions != sessions {
             sessions = newSessions
         }
-        let newCount = countClaudeProcesses()
+        // loadSessions() has just refreshed lastLiveClaudePIDs; its total is
+        // the same "how many claude processes are live" signal pgrep gave us,
+        // without spawning a subprocess on every tick.
+        let newCount = lastLiveClaudePIDs.values.reduce(0) { $0 + $1.count }
         if newCount != processCount {
             processCount = newCount
         }
@@ -220,7 +225,11 @@ final class ClaudeMonitor: ObservableObject {
             let capacity = liveCwdCounts[cwd] ?? 0
             guard capacity > 0 else { continue }
             let sorted = group.sorted { $0.lastActivity > $1.lastActivity }
-            let pids = lastLiveClaudePIDs[cwd] ?? []
+            // Sort the PID list so session→PID assignment is deterministic:
+            // liveClaudeCwdCounts() appends PIDs in kernel enumeration order,
+            // which can shuffle between scans and mismatch the sorted-by-
+            // activity candidates. Sorting at least makes the pairing stable.
+            let pids = (lastLiveClaudePIDs[cwd] ?? []).sorted()
             for (idx, c) in sorted.prefix(capacity).enumerated() {
                 let isActive = now.timeIntervalSince(c.lastActivity) < activeThreshold
                 // Use sticky cached values so the UI's context ring
@@ -550,29 +559,6 @@ final class ClaudeMonitor: ObservableObject {
             print("[NotchPilot] liveClaudeCwdCounts: \(counts)")
         }
         return counts
-    }
-
-    private func countClaudeProcesses() -> Int {
-        let task = Process()
-        task.launchPath = "/usr/bin/pgrep"
-        task.arguments = ["-fl", "claude"]
-        let out = Pipe()
-        task.standardOutput = out
-        task.standardError = Pipe()
-        do {
-            try task.run()
-            task.waitUntilExit()
-        } catch {
-            return 0
-        }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        guard let text = String(data: data, encoding: .utf8) else { return 0 }
-
-        return text.split(whereSeparator: \.isNewline).filter { line in
-            let s = String(line).lowercased()
-            guard !s.contains("notch") else { return false }
-            return s.contains("claude")
-        }.count
     }
 
     // MARK: - Session detail timeline
