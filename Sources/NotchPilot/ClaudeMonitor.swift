@@ -226,7 +226,18 @@ final class ClaudeMonitor: ObservableObject {
                     }
                 }
 
-                let projectName = (parsed.cwd as NSString).lastPathComponent
+                // Two-part display name: "launchDir → workDir". The launch
+                // dir (from the transcript's FIRST entry, cached forever)
+                // is the tab's stable identity; the work dir (last entry)
+                // is wherever the agent cd'd to. Showing only the work dir
+                // made a home-launched tab that touched boyang-logo look
+                // like a separate "boyang" session the user thought he had
+                // closed.
+                let workName = (parsed.cwd as NSString).lastPathComponent
+                let launchName = (launchCwd(of: jsonlURL) as NSString).lastPathComponent
+                let projectName = (launchName.isEmpty || launchName == workName)
+                    ? workName
+                    : "\(launchName) → \(workName)"
                 let startTime: Date = {
                     if let attrs = try? fm.attributesOfItem(atPath: jsonlURL.path),
                        let created = attrs[.creationDate] as? Date {
@@ -400,6 +411,32 @@ final class ClaudeMonitor: ObservableObject {
         stickyContextWindow = stickyContextWindow.filter { livePaths.contains($0.key) }
 
         return result.sorted { $0.lastActivity > $1.lastActivity }
+    }
+
+    /// Launch cwd per jsonl — the `cwd` of the FIRST entry, i.e. where the
+    /// user started this claude. Immutable for a session's lifetime, so
+    /// cache it forever (keyed by path; session IDs are never reused).
+    private var launchCwdCache: [String: String] = [:]
+
+    private func launchCwd(of url: URL) -> String {
+        if let cached = launchCwdCache[url.path] { return cached }
+        var found = ""
+        if let fh = FileHandle(forReadingAtPath: url.path) {
+            let head = fh.readData(ofLength: 16 * 1024)
+            fh.closeFile()
+            if let text = String(data: head, encoding: .utf8) {
+                for line in text.split(whereSeparator: \.isNewline).prefix(10) {
+                    if let data = line.data(using: .utf8),
+                       let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let cwd = obj["cwd"] as? String, !cwd.isEmpty {
+                        found = cwd
+                        break
+                    }
+                }
+            }
+        }
+        launchCwdCache[url.path] = found
+        return found
     }
 
     private func mtime(_ url: URL) -> Date? {
@@ -674,15 +711,15 @@ final class ClaudeMonitor: ObservableObject {
         var counts: [String: Int] = [:]
         for pid in ProcessLookup.allPIDs() where pid > 0 {
             let name = ProcessLookup.name(of: pid) ?? ""
+            let exePath = ProcessLookup.path(of: pid)?.lowercased() ?? ""
+            // The Claude DESKTOP app's process is also named "claude" —
+            // exclude anything living inside an .app bundle so it doesn't
+            // inflate the process count with a cwd of "/".
+            guard !exePath.contains(".app/contents/") else { continue }
             let nameMatches = name.lowercased() == "claude"
-            var pathMatches = false
-            if !nameMatches {
-                if let exePath = ProcessLookup.path(of: pid)?.lowercased() {
-                    pathMatches = exePath.contains("/claude/versions/")
-                        || exePath.hasSuffix("/claude")
-                        || exePath.hasSuffix("/bin/claude")
-                }
-            }
+            let pathMatches = exePath.contains("/claude/versions/")
+                || exePath.hasSuffix("/claude")
+                || exePath.hasSuffix("/bin/claude")
             guard nameMatches || pathMatches else { continue }
 
             guard let cwd = ProcessLookup.cwd(of: pid), !cwd.isEmpty else { continue }
