@@ -34,6 +34,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hookBridge.onSessionEnd = { [weak self] sid in
             self?.monitor.markSessionEnded(sid)
         }
+        monitor.sessionPIDProvider = { [weak self] in
+            self?.hookBridge.sessionPIDs ?? [:]
+        }
         hookBridge.start()
 
         // Always start the regular notch window underneath the intro —

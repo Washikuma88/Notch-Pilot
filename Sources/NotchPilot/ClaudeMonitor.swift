@@ -79,6 +79,12 @@ final class ClaudeMonitor: ObservableObject {
     /// Used to assign a specific PID to each session for tmux navigation.
     private var lastLiveClaudePIDs: [String: [Int32]] = [:]
 
+    /// Wired by AppDelegate to HookBridge.sessionPIDs — the session→PID
+    /// mapping learned from hook events. Where available it gives exact
+    /// per-session liveness, replacing the group-capacity guessing that
+    /// let zombie jsonls occupy slots and push live sessions out.
+    var sessionPIDProvider: (() -> [String: Int32])?
+
     /// Session IDs whose SessionEnd hook fired, with the time it fired.
     /// A cancelled session's jsonl keeps a fresh mtime for a while after
     /// exit — without this it would occupy a capacity slot and push a
@@ -282,11 +288,6 @@ final class ClaudeMonitor: ObservableObject {
         // forever). Matching drifting-cwd against process-cwd silently
         // filtered out every session whose agent was working inside a
         // project subdirectory.
-        var grouped: [String: [Candidate]] = [:]
-        for c in candidates {
-            grouped[c.projectDirName, default: []].append(c)
-        }
-
         // Munge live process cwds the same way Claude Code names project
         // directories, so both sides of the lookup share a stable key.
         var countsByDir: [String: Int] = [:]
@@ -298,54 +299,98 @@ final class ClaudeMonitor: ObservableObject {
             pidsByDir[Self.mungeCwd(cwd), default: []].append(contentsOf: pids)
         }
 
+        func makeSession(_ c: Candidate, pid: Int32?) -> ClaudeSession {
+            let isActive = now.timeIntervalSince(c.lastActivity) < activeThreshold
+            // Use sticky cached values so the UI's context ring
+            // never flickers when a tail parse happens to land on
+            // a non-usage entry.
+            let stickyTokens = stickyContextTokens[c.jsonlPath]
+                ?? (c.parsed.contextTokens > 0 ? c.parsed.contextTokens : 0)
+            let stickyWindow = stickyContextWindow[c.jsonlPath] ?? 200_000
+
+            // A delegating session's own tail often has no tool_use in
+            // the parse window (agent chatter pushes it out), leaving
+            // shortStatus empty — which the UI reads as "idle". When
+            // agents are actively writing, surface them as the status.
+            let status = (c.parsed.status.isEmpty && c.activeAgents > 0)
+                ? "\(c.activeAgents) agent\(c.activeAgents == 1 ? "" : "s")"
+                : c.parsed.status
+            let message = (c.parsed.message.isEmpty && c.activeAgents > 0)
+                ? "\(c.activeAgents) agent\(c.activeAgents == 1 ? "" : "s") running"
+                : c.parsed.message
+
+            return ClaudeSession(
+                id: c.sessionID,
+                projectName: c.projectName,
+                projectPath: c.projectPath,
+                cwd: c.parsed.cwd,
+                startTime: c.startTime,
+                lastActivity: c.lastActivity,
+                lastMessage: message,
+                shortStatus: status,
+                model: c.parsed.model,
+                nativeMode: c.parsed.nativeMode,
+                toolAction: c.parsed.toolAction,
+                isActive: isActive,
+                contextTokens: stickyTokens,
+                contextWindow: stickyWindow,
+                claudePID: pid,
+                activeAgentCount: c.activeAgents
+            )
+        }
+
+        // Exact per-session liveness where hook events have taught us the
+        // session→PID mapping (HookBridge.sessionPIDs). A hook-confirmed
+        // live session is always shown; a hook-confirmed dead one is never
+        // shown; only sessions we know nothing about fall back to the
+        // group-capacity heuristic below.
+        let pidMap = sessionPIDProvider?() ?? [:]
+        enum HookLiveness { case alive(Int32), dead, unknown }
+        func hookLiveness(_ sessionID: String) -> HookLiveness {
+            guard let pid = pidMap[sessionID] else { return .unknown }
+            // Guard against PID reuse: the pid must still be a claude
+            // process, not just any process that inherited the number.
+            let name = (ProcessLookup.name(of: pid) ?? "").lowercased()
+            let path = ProcessLookup.path(of: pid)?.lowercased() ?? ""
+            let stillClaude = name == "claude"
+                || path.contains("/claude/versions/")
+                || path.hasSuffix("/claude")
+                || path.hasSuffix("/bin/claude")
+            return stillClaude ? .alive(pid) : .dead
+        }
+
         var result: [ClaudeSession] = []
-        for (dirName, group) in grouped {
-            let capacity = countsByDir[dirName] ?? 0
+        var aliveByDir: [String: Int] = [:]
+        var alivePIDs = Set<Int32>()
+        var unknownByDir: [String: [Candidate]] = [:]
+
+        for c in candidates {
+            switch hookLiveness(c.sessionID) {
+            case .alive(let pid):
+                aliveByDir[c.projectDirName, default: 0] += 1
+                alivePIDs.insert(pid)
+                result.append(makeSession(c, pid: pid))
+            case .dead:
+                continue
+            case .unknown:
+                unknownByDir[c.projectDirName, default: []].append(c)
+            }
+        }
+
+        // Unknown candidates compete for whatever capacity the confirmed
+        // ones didn't use. Most recently active wins within a group.
+        for (dirName, group) in unknownByDir {
+            let capacity = max(0, (countsByDir[dirName] ?? 0) - (aliveByDir[dirName] ?? 0))
             guard capacity > 0 else { continue }
             let sorted = group.sorted { $0.lastActivity > $1.lastActivity }
-            // Sort the PID list so session→PID assignment is deterministic:
-            // liveClaudeCwdCounts() appends PIDs in kernel enumeration order,
-            // which can shuffle between scans and mismatch the sorted-by-
-            // activity candidates. Sorting at least makes the pairing stable.
-            let pids = (pidsByDir[dirName] ?? []).sorted()
+            // Sort the remaining PID list so session→PID assignment is
+            // deterministic across scans; confirmed-alive PIDs are excluded
+            // so a zombie can't be handed a live session's pid.
+            let pids = (pidsByDir[dirName] ?? [])
+                .filter { !alivePIDs.contains($0) }
+                .sorted()
             for (idx, c) in sorted.prefix(capacity).enumerated() {
-                let isActive = now.timeIntervalSince(c.lastActivity) < activeThreshold
-                // Use sticky cached values so the UI's context ring
-                // never flickers when a tail parse happens to land on
-                // a non-usage entry.
-                let stickyTokens = stickyContextTokens[c.jsonlPath]
-                    ?? (c.parsed.contextTokens > 0 ? c.parsed.contextTokens : 0)
-                let stickyWindow = stickyContextWindow[c.jsonlPath] ?? 200_000
-
-                // A delegating session's own tail often has no tool_use in
-                // the parse window (agent chatter pushes it out), leaving
-                // shortStatus empty — which the UI reads as "idle". When
-                // agents are actively writing, surface them as the status.
-                let status = (c.parsed.status.isEmpty && c.activeAgents > 0)
-                    ? "\(c.activeAgents) agent\(c.activeAgents == 1 ? "" : "s")"
-                    : c.parsed.status
-                let message = (c.parsed.message.isEmpty && c.activeAgents > 0)
-                    ? "\(c.activeAgents) agent\(c.activeAgents == 1 ? "" : "s") running"
-                    : c.parsed.message
-
-                result.append(ClaudeSession(
-                    id: c.sessionID,
-                    projectName: c.projectName,
-                    projectPath: c.projectPath,
-                    cwd: c.parsed.cwd,
-                    startTime: c.startTime,
-                    lastActivity: c.lastActivity,
-                    lastMessage: message,
-                    shortStatus: status,
-                    model: c.parsed.model,
-                    nativeMode: c.parsed.nativeMode,
-                    toolAction: c.parsed.toolAction,
-                    isActive: isActive,
-                    contextTokens: stickyTokens,
-                    contextWindow: stickyWindow,
-                    claudePID: idx < pids.count ? pids[idx] : nil,
-                    activeAgentCount: c.activeAgents
-                ))
+                result.append(makeSession(c, pid: idx < pids.count ? pids[idx] : nil))
             }
         }
 
